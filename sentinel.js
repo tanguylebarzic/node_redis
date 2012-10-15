@@ -43,9 +43,6 @@ function RedisMetaClient(masterName, startingSentinels) {
             }
         }
         self.messagesReceived = newLastMessages;
-
-
-        console.log(self.masterClients.length);
     }, 2000);
 
     this.getSentinels(startingSentinels, function(error, sentinelsConfig) {
@@ -68,7 +65,6 @@ function RedisMetaClient(masterName, startingSentinels) {
     this.on('sentinelsConfigured', function() {
         self.sentinelsConfigured();
     });
-
 }
 
 util.inherits(RedisMetaClient, events.EventEmitter);
@@ -455,6 +451,7 @@ RedisMetaClient.prototype.masterAvailable = function(availableMaster) {
     this.masterClients.forEach(function(masterClient){
         masterClient.client.host = availableMaster.host;
         masterClient.client.port = availableMaster.port;
+        masterClient.client.forceReconnectionAttempt();
     });
 
     this.emit('healthyChange', true);
@@ -476,43 +473,5 @@ RedisMetaClient.prototype.createMasterClient = function(options) {
     this.masterClients.push({config: this.master, client: client, id: id});
     return client;
 };
-
-// RedisMetaClient.prototype.getMasterClient = function(options, cb) {
-    
-//     if(this.healthy){
-//         return RedisSingleClient.createClient(this.master.port, this.master.host, options);
-//     }
-//     else {
-//         var client = {};
-//         for (var i in RedisSingleClient.RedisClient.prototype) {
-//             console.log(i);
-
-//         }
-//     }
-//     // for (var i in RedisSingleClient.RedisClient.prototype) {
-//     //     console.log(i);
-//     //     if(healthy){
-
-//     //     }
-//     //     else {
-
-//     //     }
-//     // }
-//     // if(this.healthy && this.masterClient) {
-//     //     return cb(null, this.masterClient);
-//     // } else {
-//     //     if(this.healthy && !this.masterClient){
-//     //         console.log("this.masterClient not available");
-//     //     }
-//     //     return cb("Unhealthy");
-//     // }
-//     // console.log(this.healthy);
-//     // console.log(this.master.port);
-//     // if(this.masterClient) {
-//     //     return this.masterClient;
-//     // } else {
-//     //     return false;
-//     // }
-// };
 
 exports.RedisMetaClient = RedisMetaClient;

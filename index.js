@@ -467,6 +467,12 @@ RedisClient.prototype.connection_gone = function (why) {
     }, this.retry_delay);
 };
 
+RedisClient.prototype.forceReconnectionAttempt = function (){
+    clearTimeout(this.retry_timer);
+    this.initialize_retry_vars();
+    this.connection_gone();
+};
+
 RedisClient.prototype.on_data = function (data) {
     if (exports.debug_mode) {
         console.log("net read " + this.host + ":" + this.port + " id " + this.connection_id + ": " + data.toString());
