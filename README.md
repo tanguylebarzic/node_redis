@@ -19,44 +19,56 @@ If you use `hiredis`, be sure to rebuild it whenever you upgrade your version of
 happen between node and native code modules after a node upgrade.
 
 
-## Usage
+## Sentinel Usage
 
-Simple example, included as `examples/simple.js`:
+Simple example of a sentinel-aware client
 
-```js
-    var redis = require("redis"),
-        client = redis.createClient();
+```javascript
+var RedisMetaClient = require("./../node_redis/sentinel").RedisMetaClient;
+var sentinels = [
+    {host: "127.0.0.1", port: 26382},
+    {host: "127.0.0.1", port: 26383},
+    {host: "127.0.0.1", port: 26384}
+];
+var redisMetaClient = new RedisMetaClient("mymaster", sentinels);
+var i = 0;
 
-    // if you'd like to select database 3, instead of 0 (default), call
-    // client.select(3, function() { /* ... */ });
+var client = redisMetaClient.createMasterClient();
+client.on('error', function(error){
+    console.log(error);
+});
 
-    client.on("error", function (err) {
-        console.log("Error " + err);
-    });
-
-    client.set("string key", "string val", redis.print);
-    client.hset("hash key", "hashtest 1", "some value", redis.print);
-    client.hset(["hash key", "hashtest 2", "some other value"], redis.print);
-    client.hkeys("hash key", function (err, replies) {
-        console.log(replies.length + " replies:");
-        replies.forEach(function (reply, i) {
-            console.log("    " + i + ": " + reply);
-        });
-        client.quit();
-    });
+setInterval(function(){
+    client.set('test:' + i, i, function(error, result){
+        if(!error){
+            console.log('success, ' + i);
+            ++i;
+        }
+        else {
+            console.log('error, ' + i);
+        }
+   });
+}, 500);
 ```
 
-This will display:
+Basically, you first have to create a 'RedisMetaClient', configured with the name of the master and a list of sentinels. Then, calling `redisMetaClient.createMasterClient();` will give you a client similar to the usual `redis.createClient();`
 
-    mjr:~/work/node_redis (master)$ node example.js
-    Reply: OK
-    Reply: 0
-    Reply: 0
-    2 replies:
-        0: hashtest 1
-        1: hashtest 2
-    mjr:~/work/node_redis (master)$
+## What works:
+- Basic functionnality, ie. setup of the correct master, failover... If the master change, all the current masterClients (created by `redisMetaClient.createMasterClient();` will be updated to point to the new master, so that one doesn't need to look for client.on('error') to update the connection.
+I have try to preserve the idea of an offline queue, ie. being able to send commands before the master is found and configured.
+- I have tested with simple requests, pub/sub... but not with multi (may work, just not sure).
 
+## How was is it done:
+I've tried to modify as less as possible the code and behaviour of the single client (what's in 'client.js'). sentinel.js contains kind of a wrapper around client.js, to deal with sentinels. 
+
+## What remains to be done:
+- Dealing with slaves (for now, nothing is done around them).
+- Testing (both by hand and automatic) of multiple scenarios
+- Documentation
+
+## Known issues:
+- the event `ready` is triggered multiple times for a masterClient if a failover happened, which can result in unexpected behaviours based on the way it's used
+- many others that I don't know about
 
 ## Performance
 
