@@ -464,18 +464,18 @@ RedisMetaClient.prototype.createMasterClient = function(options) {
     options = options || {};
     options.allowNoSocket = true;
     var client = RedisSingleClient.createClient(this.master.port, this.master.host, options);
-    var id = ++this.masterClientId;
     var self = this;
+    var connection_id = client.connection_id;
     client.on('error', function(){});
     client.on('end', function(){
         for (var i = 0, len = self.masterClients.length; i < len; i++) {
             var cl = self.masterClients[i];
-            if(cl.client.closing === true && id === cl.id){
+            if(cl.client.closing === true && connection_id === cl.client.connection_id){
                 self.masterClients = self.masterClients.slice(i, 1);
             }
         }
     });
-    this.masterClients.push({config: this.master, client: client, id: id});
+    this.masterClients.push({config: this.master, client: client});
     return client;
 };
 
