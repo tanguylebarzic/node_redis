@@ -24,7 +24,10 @@ function reply_to_object(reply) {
 
 function RedisMetaClient(masterName, startingSentinels) {
     this.healthy = false;
-    this.master = null;
+    this.master = {
+        host: null,
+        port: null
+    };
     this.masterClientId = 0;
     this.masterClients = [];
     this.masterName = masterName;
@@ -458,6 +461,8 @@ RedisMetaClient.prototype.masterAvailable = function(availableMaster) {
 };
 
 RedisMetaClient.prototype.createMasterClient = function(options) {
+    options = options || {};
+    options.allowNoSocket = true;
     var client = RedisSingleClient.createClient(this.master.port, this.master.host, options);
     var id = ++this.masterClientId;
     var self = this;
