@@ -450,6 +450,8 @@ RedisMetaClient.prototype.masterAvailable = function(availableMaster) {
 RedisMetaClient.prototype.createMasterClient = function(options) {
     options = options || {};
     options.allowNoSocket = true;
+    options.no_ready_check = true;
+
     var client = RedisSingleClient.createClient(this.master.port, this.master.host, options);
     var self = this;
     var connection_id = client.connection_id;
