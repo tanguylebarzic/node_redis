@@ -1,26 +1,10 @@
 var events = require("events");
+var reply_to_object = require("./lib/utils").reply_to_object;
 var util = require("util");
-
-exports.debug_mode = true;
 
 var RedisSingleClient = require("./index");
 
-function reply_to_object(reply) {
-    var obj = {},
-        j, jl, key, val;
-
-    if(reply.length === 0) {
-        return null;
-    }
-
-    for(j = 0, jl = reply.length; j < jl; j += 2) {
-        key = reply[j].toString();
-        val = reply[j + 1];
-        obj[key] = val;
-    }
-
-    return obj;
-}
+exports.debug_mode = true;
 
 function RedisMetaClient(masterName, startingSentinels) {
     this.healthy = false;
@@ -193,8 +177,6 @@ RedisMetaClient.prototype.initSentinelConnection = function(sentinelConfig) {
         var parts = message.split(' ');
         switch(channel) {
         case '+reset-master':
-            console.log(channel);
-            console.log(message);
             break;
 
         case '+slave':
@@ -323,11 +305,14 @@ RedisMetaClient.prototype.initSentinelConnection = function(sentinelConfig) {
 
 
         default:
-            console.log(channel + "::" + message);
-            break;
+            if(exports.debug_mode){
+                console.log(channel + "::" + message);
+                break;
+            }
         }
     });
 
+    // TODO: seems a bit rude
     sentinelClient.on('error', function() {
         self.removeSentinel(sentinelConfig);
     });
@@ -335,6 +320,7 @@ RedisMetaClient.prototype.initSentinelConnection = function(sentinelConfig) {
     sentinelClient.psubscribe('*');
 };
 
+// There are surely other things to do here
 RedisMetaClient.prototype.quit = function(){
     clearTimeout(this.cleanMessagesReceived);
 };
@@ -460,12 +446,14 @@ RedisMetaClient.prototype.masterAvailable = function(availableMaster) {
     this.emit('healthyChange', true);
 };
 
+// Return a RedisSingleCLient pointing to the master (or to nothing if there is no master yet)
 RedisMetaClient.prototype.createMasterClient = function(options) {
     options = options || {};
     options.allowNoSocket = true;
     var client = RedisSingleClient.createClient(this.master.port, this.master.host, options);
     var self = this;
     var connection_id = client.connection_id;
+
     client.on('end', function(){
         for (var i = 0, len = self.masterClients.length; i < len; i++) {
             var cl = self.masterClients[i];
@@ -474,7 +462,9 @@ RedisMetaClient.prototype.createMasterClient = function(options) {
             }
         }
     });
+
     this.masterClients.push({config: this.master, client: client});
+    
     return client;
 };
 
