@@ -466,7 +466,6 @@ RedisMetaClient.prototype.createMasterClient = function(options) {
     var client = RedisSingleClient.createClient(this.master.port, this.master.host, options);
     var self = this;
     var connection_id = client.connection_id;
-    client.on('error', function(){});
     client.on('end', function(){
         for (var i = 0, len = self.masterClients.length; i < len; i++) {
             var cl = self.masterClients[i];
