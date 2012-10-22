@@ -645,7 +645,7 @@ function Command(command, args, sub_command, buffer_args, callback) {
 }
 
 RedisClient.prototype.send_command = function (command, args, callback) {
-    var arg, command_obj, i, il, elem_count, buffer_args, stream = this.stream, command_str = "", buffered_writes = 0, last_arg_type;
+    var arg, command_obj, i, il, elem_count, buffer_args, stream = this.stream, command_str = "", buffered_writes = 0, last_arg_type, self = this;
 
     if (typeof command !== "string") {
         throw new Error("First argument to send_command must be the command name string, not " + typeof command);
@@ -710,7 +710,7 @@ RedisClient.prototype.send_command = function (command, args, callback) {
             if (command_obj.callback) {
                 command_obj.callback(not_writeable_error);
             } else {
-                throw not_writeable_error;
+                return self.emit("error", new Error(not_writeable_error));
             }
         }
 

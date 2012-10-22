@@ -6,8 +6,14 @@ var RedisSingleClient = require("./index");
 
 exports.debug_mode = true;
 
+var states = {
+    NOT_INITIALIZED: 1,
+    HEALTHY: 2,
+    UNHEALTHY: 3
+};
+
 function RedisMetaClient(masterName, startingSentinels) {
-    this.healthy = false;
+    this.state = states.NOT_INITIALIZED;
     this.master = {
         host: null,
         port: null
@@ -34,6 +40,7 @@ function RedisMetaClient(masterName, startingSentinels) {
 
     this.getSentinels(startingSentinels, function(error, sentinelsConfig) {
         if(error) {
+            self.emit('stateChange', states.UNHEALTHY);
             console.log(error);
             return;
         }
@@ -41,8 +48,12 @@ function RedisMetaClient(masterName, startingSentinels) {
         self.initSentinelsConnection(sentinelsConfig);
     });
 
-    this.on('healthyChange', function(newState) {
-        this.healthy = newState;
+    this.on('stateChange', function(newState) {
+        console.log("stateChange: " + newState);
+        this.state = newState;
+        if(this.state === states.UNHEALTHY){
+            self.masterUnavailable();
+        }
     });
 
     this.on('masterAvailable', function(availableMaster) {
@@ -213,13 +224,13 @@ RedisMetaClient.prototype.initSentinelConnection = function(sentinelConfig) {
 
         case '+odown':
             if(parts[0] === 'master') {
-                self.emit('healthyChange', false);
+                self.emit('stateChange', states.UNHEALTHY);
             }
             break;
 
         case '-odown':
             if(parts[0] === 'master') {
-                self.emit('healthyChange', true);
+                self.emit('stateChange', states.HEALTHY);
             }
             break;
 
@@ -228,7 +239,7 @@ RedisMetaClient.prototype.initSentinelConnection = function(sentinelConfig) {
 
         case '+failover-triggered':
             if(parts[0] === 'master') {
-                self.emit('healthyChange', false);
+                self.emit('stateChange', states.UNHEALTHY);
             }
             break;
 
@@ -326,6 +337,9 @@ RedisMetaClient.prototype.quit = function(){
 };
 
 RedisMetaClient.prototype.sentinelsConfigured = function() {
+    if(exports.debug_mode){
+        console.log("sentinelsConfigured");
+    }
     this.setupMasterConnection();
 };
 
@@ -365,6 +379,9 @@ RedisMetaClient.prototype.setupMasterConnection = function() {
 
             if(selectedMaster) {
                 self.emit('masterAvailable', selectedMaster);
+            }
+            else {
+                self.emit('stateChange', states.UNHEALTHY);
             }
         };
 
@@ -443,8 +460,17 @@ RedisMetaClient.prototype.masterAvailable = function(availableMaster) {
         masterClient.client.forceReconnectionAttempt();
     });
 
-    this.emit('healthyChange', true);
+    this.emit('stateChange', states.HEALTHY);
 };
+
+RedisMetaClient.prototype.masterUnavailable = function() {
+    console.log("masterUnavailable");
+    this.masterClients.forEach(function(masterClient){
+        masterClient.client.flush_and_error("Master not available");
+        masterClient.client.enable_offline_queue = false;
+    });
+};
+
 
 // Return a RedisSingleCLient pointing to the master (or to nothing if there is no master yet)
 RedisMetaClient.prototype.createMasterClient = function(options) {
