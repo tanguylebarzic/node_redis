@@ -4,473 +4,244 @@ var util = require("util");
 
 var RedisSingleClient = require("./index");
 
-exports.debug_mode = true;
+exports.debug_mode = false;
 
 var states = {
-    NOT_INITIALIZED: 1,
-    HEALTHY: 2,
-    UNHEALTHY: 3
+    NOT_INITIALIZED: 0,
+    HEALTHY: 1,
+    UNHEALTHY: 2
 };
 
-function RedisMetaClient(masterName, startingSentinels) {
+function RedisMetaClient(masterName, startingSentinels, options) {
+    events.EventEmitter.call(this);
+
+    this.options = options || {};
+    this.options.pingPeriod = this.options.pingPeriod || 500;
+    this.options.quorum = this.options.quorum || Math.floor(1 + (startingSentinels.length / 2));
+
     this.state = states.NOT_INITIALIZED;
+
     this.master = {
         host: null,
         port: null
     };
-    this.masterClientId = 0;
+    
     this.masterClients = [];
     this.masterName = masterName;
-    this.messagesReceived = {};
     this.sentinels = [];
-    this.slaves = [];
 
     var self = this;
-
-    this.cleanMessagesReceived = setInterval(function() {
-        var now = +(new Date());
-        var newLastMessages = [];
-        for(var i in self.messagesReceived) {
-            if(self.messagesReceived[i] > now - 4000) {
-                newLastMessages[i] = self.messagesReceived[i];
-            }
-        }
-        self.messagesReceived = newLastMessages;
-    }, 2000);
-
-    this.getSentinels(startingSentinels, function(error, sentinelsConfig) {
-        if(error) {
-            self.emit('stateChange', states.UNHEALTHY);
-            console.log(error);
-            return;
+    this.on('stateChange', function() {
+        if(exports.debug_mode){
+            console.log("stateChange detected");
         }
 
-        self.initSentinelsConnection(sentinelsConfig);
-    });
-
-    this.on('stateChange', function(newState) {
-        console.log("stateChange: " + newState);
-        this.state = newState;
-        if(this.state === states.UNHEALTHY){
-            self.masterUnavailable();
-        }
+        self.assessState();
     });
 
     this.on('masterAvailable', function(availableMaster) {
+        this.state = states.HEALTHY;
         self.masterAvailable(availableMaster);
     });
 
-    this.on('sentinelsConfigured', function() {
-        self.sentinelsConfigured();
+    this.on('masterUnavailable', function() {
+        this.state = states.UNHEALTHY;
+        self.masterUnavailable();
+    });
+
+    startingSentinels.forEach(function(sentinel){
+        self.initSentinel(sentinel);
     });
 }
 
 util.inherits(RedisMetaClient, events.EventEmitter);
 
-RedisMetaClient.prototype.getSentinels = function(startingSentinels, cb) {
-    if(!Array.isArray(startingSentinels)) {
-        return cb("Invalid argument");
-    }
-
-    if(startingSentinels.length === 0) {
-        return cb("Error in initializing sentinels");
-    }
-
-    var i = 0;
-    var self = this;
-
-    var onSentinelResultsGotten = function(error, sentinels) {
-            if(sentinels) {
-                return cb(null, sentinels);
+RedisMetaClient.prototype.assessState = function(){
+    var detectedMasters = {};
+    var currentMasterConfig = (this.master && this.master.host + ":" + this.master.port) || "";
+    var currentMasterIsOdown = false;
+    var selectedMaster;
+    
+    this.sentinels.forEach(function(sentinel) {
+        var sentinelMaster = sentinel.master;
+        var masterConfig;
+        if(sentinelMaster && sentinelMaster.state === 'odown') {
+            masterConfig = sentinelMaster.host + ":" + sentinelMaster.port;
+            if(currentMasterConfig === masterConfig){
+                currentMasterIsOdown = true;
             }
-
-            if(error) {
-                if(exports.debug_mode) {
-                    console.log(error);
-                }
-            }
-
-            if(++i >= startingSentinels.length) {
-                return cb("Error in initializing sentinels");
+            if(detectedMasters[masterConfig]) {
+                detectedMasters[masterConfig].odown = true;
             } else {
-                self.getSentinelsFromOne(startingSentinels[i], onSentinelResultsGotten);
+                detectedMasters[masterConfig] = {
+                    host: sentinelMaster.host,
+                    port: sentinelMaster.port,
+                    odown: true
+                };
             }
-        };
-
-    this.getSentinelsFromOne(startingSentinels[i], onSentinelResultsGotten);
-};
-
-RedisMetaClient.prototype.getSentinelsFromOne = function(sentinelConfig, cb) {
-    var sentinelClient = RedisSingleClient.createClient(sentinelConfig.port, sentinelConfig.host);
-    var hasResponded = false;
-    sentinelClient.on('error', function(error) {
-        if(!hasResponded){
-            hasResponded = true;
-            return cb(error);
+        }
+        if(sentinelMaster && sentinelMaster.state === 'ok') {
+            masterConfig = sentinelMaster.host + ":" + sentinelMaster.port;
+            if(detectedMasters[masterConfig]) {
+                detectedMasters[masterConfig].oks += 1;
+            } else {
+                detectedMasters[masterConfig] = {
+                    host: sentinelMaster.host,
+                    port: sentinelMaster.port,
+                    oks: 1
+                };
+            }
         }
     });
-    sentinelClient.on('ready', function() {
-        sentinelClient.send_command('SENTINEL', ["sentinels", "mymaster"], function(error, sentinels) {
-            sentinelClient.end();
-            if(hasResponded){
-                return;
-            }
-            hasResponded = true;
-            if(error) {
-                return cb(error);
-            }
-            var sentinelsConfigs = [];
-            sentinelsConfigs.push(sentinelConfig);
-            sentinels.forEach(function(otherSentinel) {
-                otherSentinel = reply_to_object(otherSentinel);
-                sentinelsConfigs.push({
-                    host: otherSentinel.ip,
-                    port: otherSentinel.port
-                });
-            });
-            return cb(null, sentinelsConfigs);
-        });
-    });
-};
 
-RedisMetaClient.prototype.initSentinelsConnection = function(sentinelsConfig) {
-    var self = this;
-
-    sentinelsConfig.forEach(function(sentinelConfig) {
-        self.initSentinelConnection(sentinelConfig);
-    });
-
-    this.emit('sentinelsConfigured');
-};
-
-RedisMetaClient.prototype.addSentinel = function(sentinelConfig) {
-    this.initSentinelConnection(sentinelConfig);
-};
-
-RedisMetaClient.prototype.removeSentinel = function(sentinelConfig) {
-    for(var i = 0; i < this.sentinels.length; i++) {
-        var existingSentinel = this.sentinels[i];
-        var existingSentinelConfig = existingSentinel.config;
-        if(existingSentinelConfig.host === sentinelConfig.host && existingSentinelConfig.port === sentinelConfig.port) {
-            if(existingSentinel.client && existingSentinel.client.end){
-                existingSentinel.client.end();
-            }
-            this.sentinels.splice(i, 1);
-            break;
-        }
-    }
-};
-
-RedisMetaClient.prototype.initSentinelConnection = function(sentinelConfig) {
-    var self = this;
-
-    this.removeSentinel(sentinelConfig);
-
-    var sentinelClient = RedisSingleClient.createClient(sentinelConfig.port, sentinelConfig.host);
-    this.sentinels.push({
-        client: sentinelClient,
-        config: sentinelConfig
-    });
-
-    sentinelClient.on('pmessage', function(pattern, channel, message) {
-        var messageHash = channel + ":" + message;
-        var previousSameMessage = self.messagesReceived[messageHash];
-        var now = +(new Date());
-        if(previousSameMessage) {
-            if(previousSameMessage > now - 4000) {
-                return;
-            }
-
-        }
-
-        self.messagesReceived[messageHash] = now;
-
-        var parts = message.split(' ');
-        switch(channel) {
-        case '+reset-master':
-            break;
-
-        case '+slave':
-            break;
-
-        case '+failover-state-reconf-slaves':
-            break;
-
-        case '+slave-reconf-sent':
-            break;
-
-        case '+slave-reconf-inprog':
-            break;
-
-        case '+slave-reconf-done':
-            break;
-
-        case '-dup-sentinel':
-            break;
-
-        case '+sentinel':
-            var sentinelConfig = {
-                host: parts[2],
-                port: parts[3]
-            };
-            self.addSentinel(sentinelConfig);
-            break;
-
-        case '+sdown':
-            break;
-
-        case '-sdown':
-            break;
-
-        case '+odown':
-            if(parts[0] === 'master') {
-                self.emit('stateChange', states.UNHEALTHY);
-            }
-            break;
-
-        case '-odown':
-            if(parts[0] === 'master') {
-                self.emit('stateChange', states.HEALTHY);
-            }
-            break;
-
-        case '+failover-takedown':
-            break;
-
-        case '+failover-triggered':
-            if(parts[0] === 'master') {
-                self.emit('stateChange', states.UNHEALTHY);
-            }
-            break;
-
-        case '+failover-state-wait-start':
-            break;
-
-        case '+failover-state-select-slave':
-            break;
-
-        case 'no-good-slave':
-            break;
-
-        case '+selected-slave':
-            break;
-
-        case '+promoted-slave':
-            break;
-
-        case '+failover-state-wait-promotion':
-            break;
-        
-        case '+failover-state-send-slaveof-noone':
-            break;
-
-        case 'failover-end-for-timeout':
-            break;
-
-        case '+failover-detected':
-            break;
-
-        case '+failover-end':
-            break;
-
-        case '+switch-master':
-            self.emit('masterAvailable', {
-                host: parts[3],
-                port: parts[4]
-            });
-            break;
-
-        case 'failover-abort-x-sdown':
-            break;
-
-        case '-slave-reconf-undo':
-            break;
-
-        case '+tilt':
-            break;
-
-        case '-tilt':
-            break;
-
-        case '-failover-abort-master-is-back':
-            // Undocumented event as of October 15th, 2012
-            break;
-
-        case '+redirect-to-master':
-            // Undocumented event as of October 15th, 2012
-            self.emit('masterAvailable', {
-                host: parts[3],
-                port: parts[4]
-            });
-            break;
-
-        case '+reboot':
-            // Undocumented event as of October 15th, 2012
-            if(parts[0] === 'master') {
-                self.emit('masterAvailable', {
-                    host: parts[2],
-                    port: parts[3]
-                });
-            }
-            break;
-
-
-        default:
-            if(exports.debug_mode){
-                console.log(channel + "::" + message);
+    for(var i in detectedMasters) {
+        if(detectedMasters.hasOwnProperty(i)) {
+            var master = detectedMasters[i];
+            if(!master.odown && master.oks >= this.options.quorum) {
+                selectedMaster = master;
                 break;
             }
         }
-    });
-
-    // TODO: seems a bit rude
-    sentinelClient.on('error', function() {
-        self.removeSentinel(sentinelConfig);
-    });
-
-    sentinelClient.psubscribe('*');
-};
-
-// There are surely other things to do here
-RedisMetaClient.prototype.quit = function(){
-    clearTimeout(this.cleanMessagesReceived);
-};
-
-RedisMetaClient.prototype.sentinelsConfigured = function() {
-    if(exports.debug_mode){
-        console.log("sentinelsConfigured");
     }
-    this.setupMasterConnection();
+
+    if(selectedMaster) {
+        if(selectedMaster.host !== this.master.host || selectedMaster.port !== this.master.port){
+            this.emit('masterAvailable', selectedMaster);
+        }
+    }
+    else {
+        // There is no master for sure. However, if there was one previously, mark it as non unavailable only if we have an odown for it
+        if(currentMasterIsOdown && this.state === states.HEALTHY){
+            this.emit('masterUnavailable');
+        }
+    }
 };
 
-RedisMetaClient.prototype.setupMasterConnection = function() {
-    var self = this;
-    var waitingResults = 0;
-    var results = [];
-
-    var onAllResultsFromSentinel = function() {
-            var detectedMasters = {};
-            var neededForMajority = Math.floor(1 + (self.sentinels.length / 2));
-            var selectedMaster;
-            results.forEach(function(result) {
-                if(result.masterUp === true) {
-                    var masterConfig = result.host + ":" + result.port;
-                    if(detectedMasters[masterConfig]) {
-                        detectedMasters[masterConfig].ups += 1;
-                    } else {
-                        detectedMasters[masterConfig] = {
-                            host: result.host,
-                            port: result.port,
-                            ups: 1
-                        };
-                    }
-                }
-            });
-
-            for(var i in detectedMasters) {
-                if(detectedMasters.hasOwnProperty(i)) {
-                    var master = detectedMasters[i];
-                    if(master.ups >= neededForMajority) {
-                        selectedMaster = master;
-                        break;
-                    }
-                }
-            }
-
-            if(selectedMaster) {
-                self.emit('masterAvailable', selectedMaster);
-            }
-            else {
-                self.emit('stateChange', states.UNHEALTHY);
-            }
-        };
-
-    var onResultFromSentinel = function(error, result) {
-        if(error && exports.debug_mode) {
-            console.log(error);
+RedisMetaClient.prototype.initSentinel = function(sentinelConfig){
+    // Check the sentinel doesn't exist yet
+    var alreadyExists = false;
+    sentinelConfig.port = parseInt(sentinelConfig.port, 10);
+    for (var i = 0; i < this.sentinels.length; i++) {
+        var thisSentinel = this.sentinels[i];
+        var thisSentinelConfig = thisSentinel.config;
+        if(thisSentinelConfig.host === sentinelConfig.host && thisSentinelConfig.port === sentinelConfig.port){
+            alreadyExists = true;
+            break;
         }
-        if(result) {
-            results.push(result);
-        }
-        if(--waitingResults === 0) {
-            onAllResultsFromSentinel();
-        }
-    };
-
-    this.sentinels.forEach(function(sentinel) {
-        waitingResults++;
-        var sentinelConfig = sentinel.config;
-        var sentinelClient = RedisSingleClient.createClient(sentinelConfig.port, sentinelConfig.host);
-        var hasResponded = false;
-
-        sentinelClient.on('error', function(error) {
-            if(!hasResponded){
-                hasResponded = true;
-                return onResultFromSentinel(error);
-            }
+    }
+    if(!alreadyExists){
+        var self = this;
+        var sentinelIndex = this.sentinels.length;
+        var setIntervalId = setInterval(function(){
+            self.pingSentinel(sentinelIndex);
+        }, this.options.pingPeriod);
+        this.sentinels.push({
+            config: sentinelConfig,
+            setIntervalId: setIntervalId
         });
-
-        sentinelClient.send_command('SENTINEL', ['get-master-addr-by-name', self.masterName], function(error, masterConfig) {
-            if(hasResponded){
-                return;
-            }
-            if(error) {
-                sentinelClient.quit();
-                hasResponded = true;
-                return onResultFromSentinel(error);
-            }
-
-            var masterHost = masterConfig[0];
-            var masterPort = masterConfig[1];
-            sentinelClient.send_command('SENTINEL', ['is-master-down-by-addr', masterHost, masterPort], function(error, masterUpResult) {
-                sentinelClient.quit();
-
-                if(hasResponded){
-                    return;
-                }
-
-                if(error) {
-                    hasResponded = true;
-                    return onResultFromSentinel(error);
-                }
-
-                if(masterUpResult[1] === "?") {
-                    // We thought we had a master, but not really
-                    return onResultFromSentinel("Master unknown");
-                }
-                var masterUp = masterUpResult[0] === 0;
-
-                hasResponded = true;
-                return onResultFromSentinel(null, {
-                    host: masterHost,
-                    port: masterPort,
-                    masterUp: masterUp
-                });
-            });
-        });
-    });
-
+    }
 };
 
 RedisMetaClient.prototype.masterAvailable = function(availableMaster) {
+    if(exports.debug_mode){
+        console.log("masterAvailable");
+        console.log(availableMaster);
+    }
     this.master = availableMaster;
     this.masterClients.forEach(function(masterClient){
         masterClient.client.host = availableMaster.host;
         masterClient.client.port = availableMaster.port;
         masterClient.client.forceReconnectionAttempt();
     });
-
-    this.emit('stateChange', states.HEALTHY);
 };
 
 RedisMetaClient.prototype.masterUnavailable = function() {
-    console.log("masterUnavailable");
+    if(exports.debug_mode){
+        console.log("masterUnavailable");
+    }
+    
     this.masterClients.forEach(function(masterClient){
         masterClient.client.flush_and_error("Master not available");
         masterClient.client.enable_offline_queue = false;
     });
 };
 
+RedisMetaClient.prototype.pingSentinel = function(sentinelIndex){
+    var sentinel = this.sentinels[sentinelIndex];
+    var sentinelConfig = sentinel.config;
+    var sentinelMaster = sentinel.master;
+    
+    var masterChanged = false;
+
+    var sentinelClient = RedisSingleClient.createClient(sentinelConfig.port, sentinelConfig.host);
+
+    var self = this;
+
+    sentinelClient.on('error', function(error) {
+        if(exports.debug_mode){
+            console.log(error);
+        }
+        sentinelClient.quit();
+    });
+    sentinelClient.on('ready', function() {
+        sentinelClient.send_command('INFO', [], function(error, info) {
+            if(error) {
+                if(exports.debug_mode){
+                    console.log(error);
+                }
+                sentinelClient.quit();
+                return;
+            }
+
+            var regex = /master(?:\d)*:name=([^,]*),status=([^,]*),address=([^:]*):([^,]*)/g;
+            var match = regex.exec(info);
+            while(match){
+                var masterName = match[1];
+                if(masterName !== self.masterName){
+                    match = regex.exec(info);
+                    continue;
+                }
+                var masterState = match[2];
+                var masterHost = match[3];
+                var masterPort = match[4];
+
+                if(!sentinelMaster ||
+                    sentinelMaster.host !== masterHost ||
+                    sentinelMaster.port !== masterPort ||
+                    sentinelMaster.state !== masterState){
+                    masterChanged = true;
+
+                    self.sentinels[sentinelIndex].master = {
+                        host: masterHost,
+                        port: masterPort,
+                        state: masterState
+                    };
+
+                    self.emit('stateChange');
+                }
+                break;
+            }
+
+            sentinelClient.send_command('SENTINEL', ["sentinels", self.masterName], function(error, sentinels) {
+                sentinelClient.quit();
+                if(error) {
+                    if(exports.debug_mode){
+                        console.log(error);
+                    }
+                    return;
+                }
+
+                sentinels.forEach(function(otherSentinelConfig) {
+                    otherSentinelConfig = reply_to_object(otherSentinelConfig);
+                    self.initSentinel({
+                        host: otherSentinelConfig.ip,
+                        port: otherSentinelConfig.port
+                    });
+                });
+            });
+        });
+    });
+};
 
 // Return a RedisSingleCLient pointing to the master (or to nothing if there is no master yet)
 RedisMetaClient.prototype.createMasterClient = function(options) {
