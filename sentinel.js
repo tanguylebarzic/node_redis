@@ -52,6 +52,10 @@ function RedisMetaClient(masterName, startingSentinels, options) {
     startingSentinels.forEach(function(sentinel){
         self.initSentinel(sentinel);
     });
+
+    setTimeout(function() {
+        self.assessState();
+    }, 5000);
 }
 
 util.inherits(RedisMetaClient, events.EventEmitter);
@@ -114,6 +118,9 @@ RedisMetaClient.prototype.assessState = function(){
         if(currentMasterIsOdown && this.state === states.HEALTHY){
             this.emit('masterUnavailable');
         }
+        else if (this.state === states.NOT_INITIALIZED){
+            this.emit('masterUnavailable');
+        }
     }
 };
 
@@ -130,22 +137,20 @@ RedisMetaClient.prototype.initSentinel = function(sentinelConfig){
         }
     }
     if(!alreadyExists){
-        var self = this;
+        if(exports.debug_mode){
+            console.log("Sentinel added, config: " + JSON.stringify(sentinelConfig));
+        }
         var sentinelIndex = this.sentinels.length;
-        var setIntervalId = setInterval(function(){
-            self.pingSentinel(sentinelIndex);
-        }, this.options.pingPeriod);
         this.sentinels.push({
-            config: sentinelConfig,
-            setIntervalId: setIntervalId
+            config: sentinelConfig
         });
+        this.pingSentinel(sentinelIndex);
     }
 };
 
 RedisMetaClient.prototype.masterAvailable = function(availableMaster) {
     if(exports.debug_mode){
-        console.log("masterAvailable");
-        console.log(availableMaster);
+        console.log("Master available, config: " + JSON.stringify(availableMaster));
     }
     this.master = availableMaster;
     this.masterClients.forEach(function(masterClient){
@@ -170,19 +175,28 @@ RedisMetaClient.prototype.pingSentinel = function(sentinelIndex){
     var sentinel = this.sentinels[sentinelIndex];
     var sentinelConfig = sentinel.config;
     var sentinelMaster = sentinel.master;
-    
     var masterChanged = false;
 
-    var sentinelClient = RedisSingleClient.createClient(sentinelConfig.port, sentinelConfig.host);
-
     var self = this;
+
+    var onFinish = function(){
+        self.sentinels[sentinelIndex].nextPing = setTimeout(function() {
+            self.pingSentinel(sentinelIndex);
+        }, self.options.pingPeriod);
+    };
+
+    var sentinelClient = RedisSingleClient.createClient(sentinelConfig.port, sentinelConfig.host, {max_attempts: 1, socket_timeout: 3000});
 
     sentinelClient.on('error', function(error) {
         if(exports.debug_mode){
             console.log(error);
         }
-        sentinelClient.quit();
     });
+
+    sentinelClient.on('end', function(){
+        onFinish();
+    });
+
     sentinelClient.on('ready', function() {
         sentinelClient.send_command('INFO', [], function(error, info) {
             if(error) {
@@ -209,15 +223,15 @@ RedisMetaClient.prototype.pingSentinel = function(sentinelIndex){
                     sentinelMaster.host !== masterHost ||
                     sentinelMaster.port !== masterPort ||
                     sentinelMaster.state !== masterState){
-                    masterChanged = true;
+                        masterChanged = true;
 
-                    self.sentinels[sentinelIndex].master = {
-                        host: masterHost,
-                        port: masterPort,
-                        state: masterState
-                    };
+                        self.sentinels[sentinelIndex].master = {
+                            host: masterHost,
+                            port: masterPort,
+                            state: masterState
+                        };
 
-                    self.emit('stateChange');
+                        self.emit('stateChange');
                 }
                 break;
             }
@@ -240,6 +254,18 @@ RedisMetaClient.prototype.pingSentinel = function(sentinelIndex){
                 });
             });
         });
+    });
+};
+
+RedisMetaClient.prototype.quit = function(){
+    this.sentinels.forEach(function(sentinel){
+        if(sentinel.nextPing){
+            clearTimeout(sentinel.nextPing);
+        }
+    });
+
+    this.masterClients.forEach(function(masterClient){
+        masterClient.client.end();
     });
 };
 
