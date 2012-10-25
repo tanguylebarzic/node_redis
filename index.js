@@ -66,7 +66,7 @@ function RedisClient(stream, options) {
     this.server_info = {};
     this.auth_pass = null;
     this.parser_module = null;
-    this.selected_db = null;	// save the selected db here, used when reconnecting
+    this.selected_db = null;    // save the selected db here, used when reconnecting
 
     this.old_state = null;
 
@@ -93,14 +93,23 @@ RedisClient.prototype.initialize_stream_listeners = function () {
         self.on_error(msg.message);
     });
 
-    this.stream.on("close", function () {
-        self.connection_gone("close");
+    this.stream.on("close", function (had_error) {
+        if(had_error !== true){
+            // Only in case the error event wasn't emitted earlier, to prevent duplicate call to connection_gone
+            self.connection_gone("close");
+        }
     });
 
     this.stream.on("end", function () {
         self.connection_gone("end");
     });
 
+    if(this.options.socket_timeout){
+        this.stream.setTimeout(this.options.socket_timeout, function () {
+            self.stream.destroy();
+        });
+    }
+    
     this.stream.on("drain", function () {
         self.should_buffer = false;
         self.emit("drain");
@@ -824,12 +833,16 @@ RedisClient.prototype.pub_sub_command = function (command_obj) {
 };
 
 RedisClient.prototype.end = function () {
-    this.stream._events = {};
     this.connected = false;
     this.ready = false;
     this.closing = true;
     clearTimeout(this.retry_timer);
-    return this.stream.end();
+    if(this.stream){
+        this.stream._events = {};
+        if(this.stream.end){
+            this.stream.end();
+        }
+    }
 };
 
 function Multi(client, args) {
@@ -886,9 +899,9 @@ commands.forEach(function (command) {
 
 // store db in this.select_db to restore it on reconnect
 RedisClient.prototype.select = function (db, callback) {
-	var self = this;
+    var self = this;
 
-	this.send_command('select', [db], function (err, res) {
+    this.send_command('select', [db], function (err, res) {
         if (err === null) {
             self.selected_db = db;
         }
